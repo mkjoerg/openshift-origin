@@ -378,8 +378,40 @@ cat > /home/${SUDOUSER}/setup-azure-node.yml <<EOF
     - restart origin-node
 EOF
 
-# Create Playbook to set Master nodes as not schedulable
+#Prepare Azure hosts with config
+cat > /home/${SUDOUSER}/create-azure-conf.yaml <<EOF
+#!/usr/bin/ansible-playbook
+- hosts: all
+  gather_facts: no
+  serial: 1
+  become: yes
+  vars:
+    azure_conf_dir: /etc/origin/cloudprovider
+    azure_conf: "{{ azure_conf_dir }}/azure.conf"
 
+  tasks:
+  - name: make sure {{ azure_conf_dir }} exists
+    file:
+      state: directory
+      path: "{{ azure_conf_dir }}"
+
+  - name: populate {{ azure_conf }}
+    copy:
+      dest: "{{ azure_conf }}"
+      content: |
+        {
+          "aadClientId": "{{ lookup('env','AADCLIENTID') }}",
+          "aadClientSecret": "{{ lookup('env','AADCLIENTSECRET') }}",
+          "aadTenantId": "{{ lookup('env','TENANTID') }}",
+          "subscriptionId": "{{ lookup('env','SUBSCRIPTIONID') }}",
+          "tenantId": "{{ lookup('env','TENANTID') }}",
+          "resourceGroup": "{{ lookup('env','RESOURCEGROUP') }}",
+          "location": "{{ lookup('env','LOCATION') }}",
+          "cloud": "{{ lookup('env','CLOUDNAME')}}"
+        }
+EOF
+
+# Create Playbook to set Master nodes as not schedulable
 cat > /home/${SUDOUSER}/masternonschedulable.yml <<EOF
 - hosts: masters
   gather_facts: no
@@ -409,17 +441,18 @@ ansible_ssh_user=$SUDOUSER
 ansible_become=yes
 openshift_install_examples=true
 openshift_deployment_type=origin
-openshift_release=v3.7
+openshift_release=v3.9
 docker_udev_workaround=True
 openshift_use_dnsmasq=True
 openshift_master_default_subdomain=$ROUTING
 openshift_override_hostname_check=true
 osm_use_cockpit=false
 os_sdn_network_plugin_name='redhat/openshift-ovs-multitenant'
-#console_port=443
+openshift_master_api_port=443
+openshift_master_console_port=443
 openshift_cloudprovider_kind=azure
 osm_default_node_selector='type=app'
-openshift_disable_check=disk_availability,memory_availability
+openshift_disable_check=memory_availability,docker_image_availability
 # default selectors for router and registry services
 openshift_router_selector='type=infra'
 openshift_registry_selector='type=infra'
@@ -508,10 +541,23 @@ EOF
 
 echo $(date) " - Cloning openshift-ansible repo for use in installation"
 
-runuser -l $SUDOUSER -c "git clone -b release-3.7 https://github.com/openshift/openshift-ansible /home/$SUDOUSER/openshift-ansible"
+runuser -l $SUDOUSER -c "git clone https://github.com/openshift/openshift-ansible /home/$SUDOUSER/openshift-ansible"
 
 echo $(date) " - Running network_manager.yml playbook"
 DOMAIN=`domainname -d`
+
+# Create /etc/origin/cloudprovider/azure.conf on all hosts if Azure is enabled
+if [[ $AZURE == "true" ]]
+then
+  runuser $SUDOUSER -c "ansible-playbook ~/create-azure-conf.yaml"
+	if [ $? -eq 0 ]
+	then
+		echo $(date) " - Creation of Cloud Provider Config (azure.conf) completed on all nodes successfully"
+	else
+		echo $(date) " - Creation of Cloud Provider Config (azure.conf) completed on all nodes failed to complete"
+		exit 13
+	fi
+fi
 
 # Setup NetworkManager to manage eth0
 runuser -l $SUDOUSER -c "ansible-playbook openshift-ansible/playbooks/byo/openshift-node/network_manager.yml"
@@ -528,6 +574,14 @@ runuser -l $SUDOUSER -c "ansible all -b -m service -a \"name=NetworkManager stat
 echo $(date) " - Installing OpenShift Container Platform via Ansible Playbook"
 
 runuser -l $SUDOUSER -c "ansible-playbook openshift-ansible/playbooks/byo/config.yml"
+
+# Initiating installation of OpenShift Container Platform using Ansible Playbook
+echo $(date) " - Running Prerequisites via Ansible Playbook"
+runuser -l $SUDOUSER -c "ansible-playbook -f 10 openshift-ansible/playbooks/prerequisites.yml"
+
+# Initiating installation of OpenShift Container Platform using Ansible Playbook
+echo $(date) " - Installing OpenShift Origin via Ansible Playbook"
+runuser -l $SUDOUSER -c "ansible-playbook -f 10 openshift-ansible/playbooks/deploy_cluster.yml"
 
 echo $(date) " - Modifying sudoers"
 
@@ -684,13 +738,13 @@ fi
 echo $(date) "- Deleting post installation files"
 
 
-rm /home/${SUDOUSER}/addocpuser.yml
-rm /home/${SUDOUSER}/assignclusteradminrights.yml
-rm /home/${SUDOUSER}/dockerregistry.yml
-rm /home/${SUDOUSER}/setup-azure-master.yml
-rm /home/${SUDOUSER}/setup-azure-node-master.yml
-rm /home/${SUDOUSER}/setup-azure-node.yml
-rm /home/${SUDOUSER}/masternonschedulable.yml
-rm /home/${SUDOUSER}/reboot-nodes.yml
+#rm /home/${SUDOUSER}/addocpuser.yml
+#rm /home/${SUDOUSER}/assignclusteradminrights.yml
+#rm /home/${SUDOUSER}/dockerregistry.yml
+#rm /home/${SUDOUSER}/setup-azure-master.yml
+#rm /home/${SUDOUSER}/setup-azure-node-master.yml
+#rm /home/${SUDOUSER}/setup-azure-node.yml
+#rm /home/${SUDOUSER}/masternonschedulable.yml
+#rm /home/${SUDOUSER}/reboot-nodes.yml
 
 echo $(date) " - Script complete"
